@@ -1,12 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: CloudFormation template to create an EC2 instance with permissions for DynamoDB and SSM access to test  Auth update script.
 
-##
-# Internal Description: Builds EC2 to test auth update in dynamodb table.
-# Created By: Fadi Almobayed <fadi.mobayed@bounteous.com>
-# Maintained By: Bounteous Dining DevOps <dining-devops@bounteous.com>
-##
-
 Parameters:
   DynamoDBTableARN:
     Type: String
