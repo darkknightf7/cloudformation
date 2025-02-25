@@ -1,0 +1,204 @@
+--
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Lambda IaC
+
+########################### Parameters ########################### 
+# Action: Insert Parameters Below
+# Required: No
+
+# Parameters:
+Parameters:
+  ### Environment Name ###
+  Environment:
+    Type: String
+    Description: Environment value
+    Default: dev
+    AllowedValues:
+      - prod
+      - staging
+      - uat
+      - dev
+  
+  ### Tenant Domain ###
+  TenantDomain:
+    Type: String
+    Description: Client domain name
+  
+  ### MigrationDomain? ###
+  MigrationDomain:
+    Type: String
+    Description: |
+      Used to toggle the endpoint subdomain between migration.client.com and client.com. 
+      Select true to use migration.test.com and select false to use testcom. 
+      test.com is used for new sites and once migration sites are cutover to test.com
+    Default: false    
+    AllowedValues:
+      - false
+      - true
+
+  TenantName:
+    Type: String
+    Description: Client name 
+
+#End of Parameters
+#################################
+
+########################### Metadata ###########################
+# Action: Insert Metadata Below
+# Required: No
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "Tenant Configuration"
+        Parameters: 
+          - TenantName
+          - TenantDomain
+      - 
+        Label: 
+          default: "Environment Configuration"
+        Parameters: 
+          - Environment    
+      - 
+        Label: 
+          default: "Migration Domain Configuration"
+        Parameters: 
+          - MigrationDomain
+#End of Metadata
+#################################
+
+########################### Conditions ########################### 
+# Action: Set Conditions Below
+# Required: No
+
+#Conditions:
+Conditions:
+  ISmigration: !Equals 
+    - !Ref MigrationDomain
+    - true
+
+#End of Conditions
+#################################
+
+########################### Resources ########################### 
+# Action: Insert Resources Below
+# Required: Yes
+
+Resources:
+
+  ### test processing lambda function
+  testprocessingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          const https = require('https');
+          exports.handler = async (event) => {
+              // Retrieve the GET_URL from the event payload.
+              const getUrl = event.GET_URL;
+              if (!getUrl) {
+                  throw new Error("Missing GET_URL parameter in event payload");
+              }
+
+              let dataString = '';
+              let statusCode;
+              const response = await new Promise((resolve, reject) => {
+                  const req = https.get(getUrl, function(res) {
+                    statusCode = res.statusCode;
+                    res.on('data', chunk => {
+                      dataString += chunk;
+                    });
+                    res.on('end', () => {
+                      resolve({
+                          statusCode: 200,
+                          body: dataString
+                      });
+                    });
+                  });
+                  req.on('error', (e) => {
+                    reject({
+                        statusCode: 500,
+                        body: '{ "eventType": "Lambda-Error-processing" }'
+                    });
+                  });
+              });
+              if (statusCode >= 200 && statusCode < 300) {
+                return response;
+              } else {
+                console.error({
+                  statusCode,
+                  response
+                });
+                throw new Error('Request failed with statusCode ' + statusCode, { 
+                  cause: response
+                });
+              }
+          };
+      Description: !Sub "${TenantName} ${Environment} processor lambda for dynamodb"
+      FunctionName: !Sub ${TenantName}-test-${Environment}
+      Handler: index.handler
+      Role:
+        Fn::ImportValue:
+          !Sub ${TenantName}-nnapiFunctionRole-${Environment}
+      Runtime: nodejs16.x
+      Timeout: 60
+
+  ### cloudwatch rule for processing lambda function (migration /api/test/run or standard /api/test)
+  CloudwatchRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: !Sub "Invokes Lambda function ${TenantName}-test-${Environment}-processing"
+      ScheduleExpression: "rate(10 minutes)"
+      State: "ENABLED"
+      Targets: 
+        - Arn: !GetAtt testprocessingLambda.Arn
+          Id: !Sub "${TenantName}-testLambda-${Environment}"
+          Input: !If
+            - ISmigration
+            - !Sub '{"GET_URL": "https://test-${Environment}-migration.${TenantDomain}/api/test"}' 
+            - !Sub '{"GET_URL": "https://test-${Environment}.${TenantDomain}/api/test"}'
+
+  ### test cloudwatch rule for processing lambda function (/api/test/run)
+  CloudwatchRuleDrm: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: !Sub "Invokes Lambda function ${TenantName}-test-${Environment}-processing"
+      ScheduleExpression: "cron(0 11 * * ? *)" ###Time in UTC
+      State: "ENABLED"
+      Targets: 
+        - Arn: !GetAtt testprocessingLambda.Arn
+          Id: !Sub "${TenantName}-testprocessingLambda-${Environment}"
+          Input: !Sub '{"GET_URL": "https://test-${Environment}.${TenantDomain}/api/test/run"}'
+
+
+  ### test permission to invoke lambda function from cloudwatch rule
+  PermissionForCloudwatchRuleToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref testprocessingLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt CloudwatchRule.Arn
+
+   ### Lambda Permission for CloudwatchRuleDrm
+  PermissionForCloudwatchRuleDrm: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref testprocessingLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt CloudwatchRuleDrm.Arn    
+
+#End of Resources
+#################################
+
+########################### Outputs ########################### 
+# Action: Insert Outputs Below
+# Required: No
+
+# Outputs:
+
+#End of Outputs
+#################################
