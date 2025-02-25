@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create an EC2 instance with permissions for DynamoDB and SSM access to test  Auth update script.
+
+##
+# Internal Description: Builds EC2 to test auth update in dynamodb table.
+# Created By: Fadi Almobayed <fadi.mobayed@bounteous.com>
+# Maintained By: Bounteous Dining DevOps <dining-devops@bounteous.com>
+##
+
+Parameters:
+  DynamoDBTableARN:
+    Type: String
+    Description: ARN of the DynamoDB table to grant access to
+  EC2InstanceType:
+    Type: String
+    Default: r5.2xlarge
+    Description: Instance type for the EC2 instance
+
+Resources:
+  IACTokenUpdateVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: iac-token-update-vpc
+
+  IACTokenUpdateInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: iac-token-update-internet-gateway
+
+  IACTokenUpdateAttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref IACTokenUpdateVPC
+      InternetGatewayId: !Ref IACTokenUpdateInternetGateway
+
+  IACTokenUpdatePublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref IACTokenUpdateVPC
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: iac-token-update-public-subnet
+
+  IACTokenUpdatePrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref IACTokenUpdateVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: iac-token-update-private-subnet
+
+  IACTokenUpdateNATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  IACTokenUpdateNATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt IACTokenUpdateNATGatewayEIP.AllocationId
+      SubnetId: !Ref IACTokenUpdatePublicSubnet
+      Tags:
+        - Key: Name
+          Value: iac-token-update-public-nat-gateway
+
+  IACTokenUpdatePublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref IACTokenUpdateVPC
+      Tags:
+        - Key: Name
+          Value: iac-token-update-public-route-table
+
+  IACTokenUpdatePublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref IACTokenUpdatePublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IACTokenUpdateInternetGateway
+
+  IACTokenUpdatePublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref IACTokenUpdatePublicSubnet
+      RouteTableId: !Ref IACTokenUpdatePublicRouteTable
+
+  IACTokenUpdatePrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref IACTokenUpdateVPC
+      Tags:
+        - Key: Name
+          Value: iac-token-update-private-route-table
+
+  IACTokenUpdatePrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref IACTokenUpdatePrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref IACTokenUpdateNATGateway
+
+  IACTokenUpdatePrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref IACTokenUpdatePrivateSubnet
+      RouteTableId: !Ref IACTokenUpdatePrivateRouteTable
+
+  IACTokenUpdateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: iac-token-update-security-group
+      GroupDescription: Allow HTTP and HTTPS inbound traffic and all outbound traffic
+      VpcId: !Ref IACTokenUpdateVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  IACTokenUpdateEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref EC2InstanceType
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}"
+      IamInstanceProfile: !Ref IACTokenUpdateEC2InstanceProfile
+      SubnetId: !Ref IACTokenUpdatePrivateSubnet
+      SecurityGroupIds:
+        - !Ref IACTokenUpdateSecurityGroup
+      Tags:
+        - Key: Name
+          Value: iac-token-update-ec2-instance
+
+  IACTokenUpdateInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: iac-token-update-dynamodb-ec2-role-poc
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ["ec2.amazonaws.com"]
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: IacTokeUpdateDynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource: !Ref DynamoDBTableARN
+              - Effect: Allow
+                Action:
+                  - dynamodb:ListTables
+                Resource: "*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  IACTokenUpdateEC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref IACTokenUpdateInstanceRole
+
+Outputs:
+  InstanceId:
+    Description: Instance ID of the created EC2 instance
+    Value: !Ref IACTokenUpdateEC2Instance
